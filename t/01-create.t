@@ -47,7 +47,7 @@ subtest 'Upload a file in parts' => sub {
                 bucket      => $bucket,
                 key         => 'foo',
                 upload_id   => $client->multipart_upload_id,
-                part_number => 1,
+                part_number => $i,
                 content     => $buffer,
             ),
             'upload multipart part ' . $i,
@@ -59,7 +59,19 @@ subtest 'Upload a file in parts' => sub {
     }
 };
 
-sleep 5;
+##
+subtest 'Complete multipart upload' => sub {
+    ok(
+        my $res = $client->multipart_upload_list_parts(
+            bucket      => $bucket,
+            key         => 'foo',
+            upload_id   => $client->multipart_upload_id,
+        ),
+        'list multipart upload parts',
+    );
+
+    explain $res;
+};
 
 ##
 subtest 'Complete multipart upload' => sub {

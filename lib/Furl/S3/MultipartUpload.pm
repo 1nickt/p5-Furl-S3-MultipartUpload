@@ -82,10 +82,13 @@ sub multipart_upload_part {
     my $response = $self->request('PUT',
         $p->{bucket},
         $p->{key},
-        { part_number => $p->{part_number}, upload_id => $p->{upload_id} },
+        { uploadId => $p->{upload_id}, partNumber => $p->{part_number} },
         { content_length => length($p->{content}), %{ $p->{headers} } },
         { content => $p->{content} },
     );
+
+use Data::Dumper;
+warn Dumper $response;
 
     my $etag = $response->{headers}{etag};
 
@@ -112,8 +115,6 @@ sub multipart_upload_complete {
         for sort { $a <=> $b } keys %{ $p->{parts} };
     $xml .= '</CompleteMultipartUpload>';
 
-warn "$xml";
-
     my $response = $self->request('POST',
         $p->{bucket},
         $p->{key},
@@ -125,6 +126,33 @@ warn "$xml";
     return $response;
 }
 
+#-- List parts in a multipart upload ----------------------------------#
+#
+sub multipart_upload_list_parts {
+    my $self = shift;
+
+    state $check = compile_named(
+        bucket      => Str->where( sub { die 'invalid bucket name' unless Furl::S3::validate_bucket($_) } ),
+        key         => NonEmptyStr,
+        upload_id   => NonEmptyStr, { default => $self->multipart_upload_id },
+        headers     => HashRef, { default => {} },
+    );
+
+    my $p = $check->(@_);
+
+    my $response = $self->request('GET',
+        $p->{bucket},
+        $p->{key},
+        { uploadId => $p->{upload_id} },
+        $p->{headers},
+    );
+
+return $response;
+
+    my $etag = $response->{headers}{etag};
+
+    return $etag;
+}
 
 #-- The following two routines are taken from Furl::S3 and extended --#
 #-- to add support for the MulipartUpload API.                      --#
@@ -159,6 +187,8 @@ sub string_to_sign {
     else {
         $str .= $path;
     }
+
+    warn "STR $str";
     $str;
 }
 
@@ -187,16 +217,25 @@ sub request {
     }
     my $resource = $self->resource( $bucket, $key );
 
-    # Support for AWS MultipartUpload API
+    ## Support for AWS MultipartUpload API
+
+    # multipart_upload_create
     if ( ! ref $params && $params eq 'uploads' ) {
         $resource .= '?' . $params;
     }
+
+use Data::Dumper;
+warn "PARAMS " . Dumper $params;
+    # multipart_upload_part
     if ( ref $params eq 'HASH' && exists $params->{uploadId} ) {
-        $resource .= '?uploadId=' . $params->{uploadId};
         if ( exists $params->{partNumber} ) {
-            $resource .= '&partNumber=' . $params->{partNumber};
+            $resource .= sprintf('?partNumber=%s&uploadId=%s', $params->{partNumber}, $params->{uploadId});
+        }
+        else {
+            $resource .= sprintf('?uploadId=%s', $params->{uploadId});
         }
     }
+warn "RESOURCE $resource";
 
     my $string_to_sign =
         $self->string_to_sign( $method, $resource, \%h );
