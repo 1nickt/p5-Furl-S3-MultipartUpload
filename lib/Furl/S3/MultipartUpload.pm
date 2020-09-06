@@ -25,11 +25,11 @@ has multipart_upload_id => (
 
 sub multipart_upload {
     my $self = shift;
-    my ($bucket, $key, $content, $headers) = @_;
+    my ($bucket, $key, $file, $headers) = @_;
 #    validate_pos( @_,
 #        { type => SCALAR, callbacks => { bucket_name => \&Furl::S3::validate_bucket } },
 #        { type => SCALAR },
-#        { type => HANDLE | SCALAR },
+#        { type => SCALAR },
 #        { type => HASHREF, optional => 1 },
 #    );
 
@@ -72,7 +72,7 @@ sub multipart_upload_part {
         bucket      => Str->where( sub { die 'invalid bucket name' unless Furl::S3::validate_bucket($_) } ),
         key         => NonEmptyStr,
         part_number => Int->where( sub { die 'invalid part number' unless $_ >= 1 && $_ <= 10_000 }),
-        upload_id   => NonEmptyStr, { default => $self->multipart_upload_id },
+        upload_id   => NonEmptyStr,
         content     => NonEmptyStr,
         headers     => HashRef, { default => {} },
     );
@@ -87,17 +87,13 @@ sub multipart_upload_part {
         { content => $p->{content} },
     );
 
-use Data::Dumper;
-warn Dumper $response;
-
-    my $etag = $response->{headers}{etag};
-
-    return $etag;
+    return $self->error( $response ) if ! Furl::S3::_http_is_success( $response->{code} );
+    return $self->_normalize_response( $response )->{etag};
 }
 
 #-- Complete a multipart upload ---------------------------------------#
 #
-sub multipart_upload_complete {
+sub multipart_complete {
     my $self = shift;
 
     state $check = compile_named(
@@ -123,7 +119,8 @@ sub multipart_upload_complete {
         { content => $xml },
     );
 
-    return $response;
+    return $self->error( $response ) if ! Furl::S3::_http_is_success( $response->{code} );
+    return 1;
 }
 
 #-- List parts in a multipart upload ----------------------------------#
@@ -196,6 +193,7 @@ sub string_to_sign {
 sub request {
     my $self = shift;
     my( $method, $bucket, $key, $params, $headers, $furl_options ) = @_;
+    # Using Params::Validate to leave the original copied code untouched.
     validate_pos( @_, 1, 1,
                   { type => SCALAR | UNDEF, optional => 1 },
                   { type => HASHREF | UNDEF | SCALAR , optional => 1, },
@@ -218,33 +216,27 @@ sub request {
     my $resource = $self->resource( $bucket, $key );
 
     ## Support for AWS MultipartUpload API
-
     # multipart_upload_create
-    if ( ! ref $params && $params eq 'uploads' ) {
-        $resource .= '?' . $params;
-    }
+    $resource .= '?' . $params if ! ref $params && $params eq 'uploads';
 
-use Data::Dumper;
-warn "PARAMS " . Dumper $params;
-    # multipart_upload_part
     if ( ref $params eq 'HASH' && exists $params->{uploadId} ) {
-        if ( exists $params->{partNumber} ) {
+         # multipart_upload_part
+         if ( exists $params->{partNumber} ) {
             $resource .= sprintf('?partNumber=%s&uploadId=%s', $params->{partNumber}, $params->{uploadId});
         }
+        # multipart_upload_complete
         else {
             $resource .= sprintf('?uploadId=%s', $params->{uploadId});
         }
     }
-warn "RESOURCE $resource";
+    ##
 
-    my $string_to_sign =
-        $self->string_to_sign( $method, $resource, \%h );
+    my $string_to_sign = $self->string_to_sign( $method, $resource, \%h );
     my $signed_string = $self->sign( $string_to_sign );
     my $auth_header = 'AWS '. $self->aws_access_key_id. ':'. $signed_string;
     $h{'authorization'} = $auth_header;
 
-    my( $host, $path_query ) =
-        $self->host_and_path_query( $bucket, $key, $params );
+    my( $host, $path_query ) = $self->host_and_path_query( $bucket, $key, $params );
     my %res;
     my @h = %h;
 
@@ -283,13 +275,43 @@ larger than ~ 100Mb. L<Furl> does not support chunked requests (see why at
 L<https://metacpan.org/pod/Furl::HTTP#FAQ>). However, Amazon provides the
 "Multipart Upload API".
 
-This is handy because the parts of an object are uploaded with the normal
-C<create_object> call and assembled later -- so you can upload in parallel,
-or before your object is completely created.
+This is handy because the parts of an object are uploaded with individual
+C<PUT> calls and assembled later -- so you can upload in parallel, or
+intermittently over time, or starting before your object is completely
+created.
 
 This module uses L<MCE::Queue> to
 
 =head1 METHODS
+
+=over
+
+=item B<multipart_upload (:$bucket :Str, :$key :Str, :$file :Str, [:$headers :Href])>
+
+Convenience method wrapping a C<multipart_create()> call, multiple
+C<multipart_upload_part> calls, and a C<multipart_complete()> call, to
+upload a large file ion one operation.
+
+=item B<multipart_create (:$bucket :Str, :$key :Str, [:$headers :Href])>
+
+Initializes a multipart upload to the specified key ion the specified
+bucket. Returns an upload ID that must be stored and used for later
+part upload and upload completion requests. For convenience the ID is
+stored in the instance's C<multipart_upload_id> attribute.
+
+=item B<multipart_upload_part (:$bucket :Str, :$key :$Str, :$part_number :$Int, :$upload_id :Str, :$content :Str, [:$headers :Href])>
+
+Uploads a part of a file. Minimum size (except for the last part) is 5MB.
+Returns an ETag, which must be stored along with the part number provided
+for later use with the upload completion request.
+
+=item B<multipart_complete (:$bucket :Str, :$key :Str, :$upload_id :Str, :$parts :Href, [:$headers :Href])>
+
+Completes a multipart upload. Returns true on success. The C<parts>
+parameter must be a hashref of ETags keyed by part numbers corresponding
+to the parts uploaded.
+
+=back
 
 =head1 SEE ALSO
 
