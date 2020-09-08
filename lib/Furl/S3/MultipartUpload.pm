@@ -8,9 +8,9 @@ use Digest::MD5 'md5_base64';
 use Furl::S3;
 use HTTP::Date;
 use Params::Validate qw(:types validate_with validate_pos);
-use Type::Params 1.004000 'compile_named';
+use Type::Params 1.004000 'compile', 'compile_named';
 use Types::Common::String 'NonEmptyStr';
-use Types::Standard qw/FileHandle HashRef Int Maybe Str/;
+use Types::Standard 'Enum', 'HashRef', 'Int', 'Str';
 
 use Moo;
 use MooX::TypeTiny;
@@ -20,7 +20,8 @@ use namespace::clean;
 extends 'Furl::S3';
 
 has multipart_upload_id => (
-    is => 'rwp',
+    is  => 'rwp',
+    isa => NonEmptyStr,
 );
 
 sub multipart_upload {
@@ -192,63 +193,65 @@ sub string_to_sign {
 ##
 sub request {
     my $self = shift;
-    my( $method, $bucket, $key, $params, $headers, $furl_options ) = @_;
-    # Using Params::Validate to leave the original copied code untouched.
-    validate_pos( @_, 1, 1,
-                  { type => SCALAR | UNDEF, optional => 1 },
-                  { type => HASHREF | UNDEF | SCALAR , optional => 1, },
-                  { type => HASHREF | UNDEF , optional => 1, },
-                  { type => HASHREF | UNDEF , optional => 1, }, );
+
+    state $check = compile(
+        Enum[qw/DELETE HEAD GET POST PUT/],
+        Str->where( sub { die 'invalid bucket name' unless Furl::S3::validate_bucket($_) } ),
+        NonEmptyStr,
+        NonEmptyStr | HashRef, { default => {} },
+        HashRef, { default => {} },
+        HashRef, { default => {} },
+    );
+
+    my $p = $check->(@_);
+
     $self->clear_error;
-    $key ||= '';
-    $params ||= +{};
-    $headers ||= +{};
-    $furl_options ||= +{};
+    $p->{params} ||= +{};
 
     my %h;
-    while (my($key, $val) = each %{$headers}) {
+    while (my($key, $val) = each %{$p->{headers}}) {
         $key =~ s/_/-/g; # content_type => content-type
         $h{lc($key)} = $val
     }
     if ( !$h{'expires'} && !$h{'date'} ) {
         $h{'date'} = time2str(time);
     }
-    my $resource = $self->resource( $bucket, $key );
+    my $resource = $self->resource( $p->{bucket}, $p->{key} );
 
     ## Support for AWS MultipartUpload API
     # multipart_upload_create
-    $resource .= '?' . $params if ! ref $params && $params eq 'uploads';
+    $resource .= '?' . $p->{params} if ! ref $p->{params} && $p->{params} eq 'uploads';
 
-    if ( ref $params eq 'HASH' && exists $params->{uploadId} ) {
+    if ( ref $p->{params} eq 'HASH' && exists $p->{params}{uploadId} ) {
          # multipart_upload_part
-         if ( exists $params->{partNumber} ) {
-            $resource .= sprintf('?partNumber=%s&uploadId=%s', $params->{partNumber}, $params->{uploadId});
+         if ( exists $p->{params}{partNumber} ) {
+            $resource .= sprintf('?partNumber=%s&uploadId=%s', $p->{params}{partNumber}, $p->{params}{uploadId});
         }
         # multipart_upload_complete
         else {
-            $resource .= sprintf('?uploadId=%s', $params->{uploadId});
+            $resource .= sprintf('?uploadId=%s', $p->{params}{uploadId});
         }
     }
     ##
 
-    my $string_to_sign = $self->string_to_sign( $method, $resource, \%h );
+    my $string_to_sign = $self->string_to_sign( $p->{method}, $resource, \%h );
     my $signed_string = $self->sign( $string_to_sign );
     my $auth_header = 'AWS '. $self->aws_access_key_id. ':'. $signed_string;
     $h{'authorization'} = $auth_header;
 
-    my( $host, $path_query ) = $self->host_and_path_query( $bucket, $key, $params );
-    my %res;
+    my( $host, $path_query ) = $self->host_and_path_query( $p->{bucket, $p->{key}, $p->{params} );
+    my %response;
     my @h = %h;
 
-    @res{qw(ver code msg headers body)} = $self->furl->request(
-        method => $method,
-        scheme => ($self->secure ? 'https' : 'http'),
-        host => $host,
+    @response{qw(ver code msg headers body)} = $self->furl->request(
+        method     => $p->{method},
+        scheme     => ($self->secure ? 'https' : 'http'),
+        host       => $host,
         path_query => $path_query,
-        headers => \@h,
-        %{$furl_options},
+        headers    => \@h,
+        %{ $p->{furl_options} },
     );
-    return \%res;
+    return \%response;
 }
 
 ##
